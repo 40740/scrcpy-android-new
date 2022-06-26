@@ -1,26 +1,21 @@
 package org.las2mile.scrcpy;
 
+
+import static android.org.apache.commons.codec.binary.Base64.encodeBase64String;
 import android.content.Context;
 import android.util.Log;
-
-import org.las2mile.scrcpy.adblib.AdbBase64;
-import org.las2mile.scrcpy.adblib.AdbConnection;
-import org.las2mile.scrcpy.adblib.AdbCrypto;
-import org.las2mile.scrcpy.adblib.AdbStream;
-
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
+import com.tananaev.adblib.AdbBase64;
+import com.tananaev.adblib.AdbConnection;
+import com.tananaev.adblib.AdbCrypto;
+import com.tananaev.adblib.AdbStream;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.NoRouteToHostException;
 import java.net.Socket;
 import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
 import java.security.NoSuchAlgorithmException;
 import java.security.spec.InvalidKeySpecException;
-
-import static android.org.apache.commons.codec.binary.Base64.encodeBase64String;
-
-//Uses code from https://github.com/Jolanrensen/ADBPlugin
 
 
 public class SendCommands {
@@ -48,9 +43,7 @@ public class SendCommands {
 
         AdbCrypto c = null;
         try {
-            FileInputStream privIn = context.openFileInput("priv.key");
-            FileInputStream pubIn = context.openFileInput("pub.key");
-            c = AdbCrypto.loadAdbKeyPair(getBase64Impl(), privIn, pubIn);
+              c = AdbCrypto.loadAdbKeyPair(getBase64Impl(), context.getFileStreamPath("priv.key"), context.getFileStreamPath("pub.key"));
         } catch (IOException | InvalidKeySpecException | NoSuchAlgorithmException | NullPointerException e) {
             // Failed to read from file
             c = null;
@@ -60,12 +53,8 @@ public class SendCommands {
         if (c == null) {
             // We couldn't load a key, so let's generate a new one
             c = AdbCrypto.generateAdbKeyPair(getBase64Impl());
-
             // Save it
-            FileOutputStream privOut = context.openFileOutput("priv.key", Context.MODE_PRIVATE);
-            FileOutputStream pubOut = context.openFileOutput("pub.key", Context.MODE_PRIVATE);
-
-            c.saveAdbKeyPair(privOut, pubOut);
+            c.saveAdbKeyPair(context.getFileStreamPath("priv.key"), context.getFileStreamPath("pub.key"));
             //Generated new keypair
         } else {
             //Loaded existing keypair
@@ -93,11 +82,18 @@ public class SendCommands {
             }
         });
         thread.start();
-
-        while (status == 1) {
+        int count = 0;
+        while (status == 1 && count < 100) {
             Log.e("ADB", "Connecting...");
-            for (int i = 0; i < 1000000; i++) {
+            try {
+                Thread.sleep(100);
+                count ++;
+            } catch (InterruptedException e) {
+                e.printStackTrace();
             }
+        }
+        if(count == 100){
+            status = 2;
         }
         return status;
     }
@@ -122,6 +118,7 @@ public class SendCommands {
 
         try {
             sock = new Socket(ip, 5555);
+            Log.e("scrcpy"," ADB socket connection successful");
         } catch (UnknownHostException e) {
             status = 2;
             throw new UnknownHostException(ip + " is no valid ip address");
@@ -136,7 +133,7 @@ public class SendCommands {
             status = 2;
         }
 
-        if (sock != null) {
+        if (sock != null && status ==1) {
             try {
                 adb = AdbConnection.create(sock, crypto);
                 adb.connect();
@@ -148,19 +145,20 @@ public class SendCommands {
             }
         }
 
-        if (adb != null) {
+        if (adb != null && status ==1) {
 
             try {
                 stream = adb.open("shell:");
             } catch (IOException | InterruptedException e) {
                 e.printStackTrace();
+                status = 2;
                 return;
             }
         }
 
-        if (stream != null) {
+        if (stream != null && status ==1) {
             try {
-                stream.write("" + '\n');
+                stream.write(" " + '\n');
             } catch (IOException | InterruptedException e) {
                 e.printStackTrace();
                 return;
@@ -170,40 +168,41 @@ public class SendCommands {
 
         String responses = "";
         boolean done = false;
-        while (!done && stream != null) {
+        while (!done && stream != null && status ==1) {
             try {
                 byte[] responseBytes = stream.read();
-                String response = new String(responseBytes, "US-ASCII");
+                String response = new String(responseBytes, StandardCharsets.US_ASCII);
                 if (response.substring(response.length() - 2).equals("$ ") ||
                         response.substring(response.length() - 2).equals("# ")) {
                     done = true;
+//                    Log.e("ADB_Shell","Prompt ready");
                     responses += response;
                     break;
                 } else {
                     responses += response;
                 }
             } catch (InterruptedException | IOException e) {
+                status = 2;
                 e.printStackTrace();
             }
         }
 
-
-        if (stream != null) {
+        if (stream != null && status ==1) {
             int len = fileBase64.length;
             byte[] filePart = new byte[4056];
             int sourceOffset = 0;
             try {
-                stream.write(" cd data/local/tmp " + '\n');
+                stream.write(" cd /data/local/tmp " + '\n');
                 while (sourceOffset < len) {
                     if (len - sourceOffset >= 4056) {
                         System.arraycopy(fileBase64, sourceOffset, filePart, 0, 4056);  //Writing in 4KB pieces. 4096-40  ---> 40 Bytes for actual command text.
                         sourceOffset = sourceOffset + 4056;
-                        String ServerBase64part = new String(filePart, "US-ASCII");
+                        String ServerBase64part = new String(filePart, StandardCharsets.US_ASCII);
                         stream.write(" echo " + ServerBase64part + " >> serverBase64" + '\n');
                         done = false;
                         while (!done) {
                             byte[] responseBytes = stream.read();
-                            String response = new String(responseBytes, "US-ASCII");
+                            String response = new String(responseBytes, StandardCharsets.US_ASCII);
                             if (response.endsWith("$ ") || response.endsWith("# ")) {
                                 done = true;
                             }
@@ -213,12 +212,12 @@ public class SendCommands {
                         byte[] remPart = new byte[rem];
                         System.arraycopy(fileBase64, sourceOffset, remPart, 0, rem);
                         sourceOffset = sourceOffset + rem;
-                        String ServerBase64part = new String(remPart, "US-ASCII");
+                        String ServerBase64part = new String(remPart, StandardCharsets.US_ASCII);
                         stream.write(" echo " + ServerBase64part + " >> serverBase64" + '\n');
                         done = false;
                         while (!done) {
                             byte[] responseBytes = stream.read();
-                            String response = new String(responseBytes, "US-ASCII");
+                            String response = new String(responseBytes, StandardCharsets.US_ASCII);
                             if (response.endsWith("$ ") || response.endsWith("# ")) {
                                 done = true;
                             }
@@ -226,13 +225,15 @@ public class SendCommands {
                     }
                 }
                 stream.write(" base64 -d < serverBase64 > scrcpy-server.jar && rm serverBase64" + '\n');
+                Thread.sleep(100);
                 stream.write(command + '\n');
             } catch (IOException | InterruptedException e) {
                 e.printStackTrace();
+                status =2;
                 return;
             }
 	}
-
+        if (status ==1);
         status = 0;
 
     }
